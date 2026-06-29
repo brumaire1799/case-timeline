@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-案件时间轴 PPT 生成器 v9（python-pptx）
+案件时间轴 PPT 生成器 v10（python-pptx）
+- 支持多方当事人（parties 数组），每方独立颜色和位置
+- 向后兼容 topParty/bottomParty 两方格式
 - 圆角矩形文本框 + 真正箭头 + 统一黑体 + PowerPoint 兼容
 用法: ~/miniconda3/bin/python3 generate_timeline_pptx.py events.json output.pptx
 """
@@ -28,21 +30,48 @@ ABOVE_Y = CARD_BOT_Y - CARD_H
 CARD_TOP_Y = TIMELINE_Y + DOT_R + CLEAR_BOT + CONN_LEN
 BELOW_Y = CARD_TOP_Y
 
-COLOR_TOP = RGBColor(0xCC, 0x00, 0x00)
-COLOR_BOT = RGBColor(0x33, 0x33, 0x33)
 COLOR_LINE = RGBColor(0x33, 0x33, 0x33)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 FONT_NAME = '黑体'
 
+# ── 多方 party 配置 ──
+def hex_to_rgb(h):
+    return RGBColor(int(h[1:3],16), int(h[3:5],16), int(h[5:7],16))
+
+def build_parties(data):
+    if 'parties' in data and len(data['parties']) > 0:
+        return data['parties']
+    tp = data.get('topParty', '原告')
+    bp = data.get('bottomParty', '被告')
+    return [
+        {'name': tp, 'color': '#CC0000', 'position': 'top'},
+        {'name': bp, 'color': '#333333', 'position': 'bottom'},
+    ]
+
 def parse_input(path):
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    data.setdefault('topParty', '原告')
-    data.setdefault('bottomParty', '被告')
+    data['_parties'] = build_parties(data)
+    data['_pcfg'] = {p['name']: {'color': p['color'], 'position': p['position']} for p in data['_parties']}
+    bot = [p for p in data['_parties'] if p['position'] == 'bottom']
+    data['_def'] = bot[-1] if bot else data['_parties'][-1]
     for e in data['events']:
         if 'party' not in e:
-            e['party'] = data['bottomParty']
+            e['party'] = data['_def']['name']
     return data
+
+def resolve_party(data, party_str):
+    """解析 party，支持"原告一、原告二"联合事件，返回 {colors, position}"""
+    import re
+    pc = data['_pcfg']
+    if party_str in pc:
+        return {'colors': [pc[party_str]['color']], 'position': pc[party_str]['position']}
+    names = [s.strip() for s in re.split(r'[、,，]', party_str) if s.strip()]
+    if len(names) > 1:
+        cs = [pc[n]['color'] for n in names if n in pc]
+        if cs:
+            return {'colors': cs, 'position': pc.get(names[0], data['_def'])['position']}
+    return {'colors': [data['_def']['color']], 'position': data['_def']['position']}
 
 def split_pages(events):
     n = len(events)
@@ -115,7 +144,8 @@ def add_arrow(slide, cx, from_y, to_y, color):
     ln.append(tailEnd)
 
 def build_slide(prs, events, data, pn, total):
-    title, tp, bp = data['title'], data['topParty'], data['bottomParty']
+    title = data['title']
+    parties = data['_parties']
     usable = SLIDE_W - MARGIN * 2
     wids = col_widths(events, usable)
     cxs = col_centers(wids)
@@ -128,18 +158,25 @@ def build_slide(prs, events, data, pn, total):
     p.font.size = Pt(16); p.font.bold = True; p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
     p.font.name = FONT_NAME; p.alignment = PP_ALIGN.LEFT
 
-    # 图例
-    lx = SLIDE_W - MARGIN - Inches(2.2)
-    tb2 = slide.shapes.add_textbox(lx, Inches(0.05), Inches(2.2), Inches(0.35))
+    # 图例（多方分组）
+    topP = [p for p in parties if p['position'] == 'top']
+    botP = [p for p in parties if p['position'] == 'bottom']
+    lx = SLIDE_W - MARGIN - Inches(2.4)
+    tb2 = slide.shapes.add_textbox(lx, Inches(0.02), Inches(2.4), Inches(0.38))
     tf2 = tb2.text_frame; tf2.word_wrap = True
     p2 = tf2.paragraphs[0]; p2.alignment = PP_ALIGN.RIGHT
-    runs = [
-        ('● ', COLOR_TOP), (tp + '  ', COLOR_TOP),
-        ('● ', COLOR_BOT), (bp, COLOR_BOT)
-    ]
-    for txt, clr in runs:
-        r = p2.add_run(); r.text = txt
-        r.font.size = Pt(9); r.font.bold = True; r.font.color.rgb = clr; r.font.name = FONT_NAME
+    if topP:
+        r = p2.add_run(); r.text = '上方：'; r.font.size = Pt(7); r.font.bold = True
+        r.font.color.rgb = RGBColor(0x66, 0x66, 0x66); r.font.name = FONT_NAME
+        for pi in topP:
+            r = p2.add_run(); r.text = f"● {pi['name']}  "
+            r.font.size = Pt(7); r.font.bold = True; r.font.color.rgb = hex_to_rgb(pi['color']); r.font.name = FONT_NAME
+    if botP:
+        r = p2.add_run(); r.text = '下方：'; r.font.size = Pt(7); r.font.bold = True
+        r.font.color.rgb = RGBColor(0x66, 0x66, 0x66); r.font.name = FONT_NAME
+        for pi in botP:
+            r = p2.add_run(); r.text = f"● {pi['name']}  "
+            r.font.size = Pt(7); r.font.bold = True; r.font.color.rgb = hex_to_rgb(pi['color']); r.font.name = FONT_NAME
 
     # 时间轴主线
     main_line = slide.shapes.add_connector(
@@ -164,8 +201,10 @@ def build_slide(prs, events, data, pn, total):
     ln.append(tailEnd)
 
     for i, evt in enumerate(events):
-        is_top = evt['party'] == tp
-        color = COLOR_TOP if is_top else COLOR_BOT
+        rp = resolve_party(data, evt['party'])
+        is_top = rp['position'] == 'top'
+        colors = [hex_to_rgb(c) for c in rp['colors']]
+        color = colors[0]  # 卡片/箭头/文字用第一方颜色
         cx = cxs[i]
         box_w = max(wids[i] - Inches(0.06), Inches(0.48))
         text_x = cx - box_w / 2
@@ -203,12 +242,28 @@ def build_slide(prs, events, data, pn, total):
         arrow_end = TIMELINE_Y - DOT_R - CLEAR_TOP if is_top else TIMELINE_Y + DOT_R + CLEAR_BOT
         add_arrow(slide, cx, CARD_BOT_Y if is_top else CARD_TOP_Y, arrow_end, color)
 
-        # 圆点
-        dot = slide.shapes.add_shape(
-            MSO_SHAPE.OVAL, cx - DOT_R, TIMELINE_Y - DOT_R, DOT_R * 2, DOT_R * 2
-        )
-        dot.fill.solid(); dot.fill.fore_color.rgb = color
-        dot.line.color.rgb = WHITE; dot.line.width = Pt(1.5)
+        # 圆点（多色扇形：adj[0]=0固定, adj[1]=张角, rotation=起始旋转）
+        if len(colors) > 1:
+            DOT_R2 = Inches(0.07)  # 14px 直径
+            n = len(colors)
+            FULL = 216.0
+            # 2方左右分(90°), 3方倒Y(150°=分界线在12/4/8点钟)
+            ROT_BASE = 90.0 if n == 2 else 150.0
+            for k in range(n):
+                pie = slide.shapes.add_shape(
+                    MSO_SHAPE.PIE, cx - DOT_R2, TIMELINE_Y - DOT_R2, DOT_R2 * 2, DOT_R2 * 2
+                )
+                pie.fill.solid(); pie.fill.fore_color.rgb = colors[k]
+                pie.line.color.rgb = WHITE; pie.line.width = Pt(1)
+                pie.adjustments[0] = 0
+                pie.adjustments[1] = FULL / n
+                pie.rotation = ROT_BASE + k * (360.0 / n)
+        else:
+            dot = slide.shapes.add_shape(
+                MSO_SHAPE.OVAL, cx - DOT_R, TIMELINE_Y - DOT_R, DOT_R * 2, DOT_R * 2
+            )
+            dot.fill.solid(); dot.fill.fore_color.rgb = color
+            dot.line.color.rgb = WHITE; dot.line.width = Pt(1.5)
 
         # 日期
         dtb = slide.shapes.add_textbox(text_x, TIMELINE_Y + DOT_R + Inches(0.02), box_w, Inches(0.14))
